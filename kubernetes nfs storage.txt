@@ -1,0 +1,303 @@
+# Kubernetes storage
+
+# Configure and Managing Storage in Kubernetes
+#    Configuration as Data - Environment Variables, Secrets and ConfigMaps
+# Persistent Storage in Containers
+#   Containers are ephemeral
+#   A container's Writable Layer is detected when container is deleted
+#   When a Pod is deleted, its container(s) is deleted from the Node
+#   How can we persist data across a Pod's lifecycle?
+#       Storage API Objects in kubernetes
+#       - Volume (any type)
+#       - Persistent Volume
+#       - Persistent Volume Claim
+#       - Storage Class (groups)
+
+# Volumes
+#   Persistent storage deployed as part of the Pod spec
+#   Implementation details for your storage
+
+# Persistent volumes
+#   Administrator defined storage in the Cluster
+#   Implementation details for your storage
+#   Lifecycle independent of the Pod
+#  Managed by the Kubelet
+#   Maps the storage in the Node
+# Types of Persistent Volumes
+#   - Networked (NFS, azureFile)
+#   - Block     (FibreChannel,iSCSI)
+#   - Cloud     (awsElasticBlockStore, azureDisk, gcePersistenDisk)
+
+# Persistent Volume Claim
+#   A request for storage by a user
+#       - Size
+#       - Acces Mode (ReadWriteOnce-RWO, ReadWriteMany-RWM, ReadOnlyMany-ROX) - Node level access, not Pod access
+#       - Storage class
+#   Enable portability of your application configurations
+#   The cluster will map a PVC to a PV
+
+# Static Provisioning Workflow
+#   Create a PersitentVolume
+#   Create a PersitentVolumeClaim
+#   Define Volume in Pod Spec
+
+# Storage Lifecycle
+#    Binding (PVC Created - Control Loop - Matcehs PVC->PV)
+# -> Using   (Pod's Lifetime)
+# -> Reclaim (PVC Deleted, Delete (default), Retain)
+
+# Defining a Persistent Volume
+#   type { nfs, fc, azureDisk, ...}
+#   capacity
+#   accessModes
+#   PersitentVolumeReclaimPolicy
+#   Labels
+
+apiVersion: v1
+kind: PersitentVolume
+metadata: 
+    name: pv-nfs-data
+spec:
+    capacity:
+        storage: 10Gi
+    accessModes:
+        - ReadWriteMany
+nfs:
+    server: 192.168.57.201
+    path: "export/volumes/pod"
+
+# Defining a Persistent Volume Claim
+#    accessModes
+#    resources
+#    StotageClassName
+#    selector
+
+apiVersion: v1
+kind: PersitentVolume
+metadata: 
+    name: pv-nfs-data
+spec:
+    accessModes:
+        - ReadWriteMany
+    resources:
+        requests:
+            storage: 10Gi
+
+# Using Persistent Volumes in Pods
+
+...
+spec:
+    volumes:
+        - name: webcontent
+        PersistentVolumeClaim
+            claimName: pvc-nfs-data
+    containers:
+        - name: nginx
+        ...
+        volumeMounts:
+        - name: webcontent
+          mountPath: "/usr/share/nginx/html/web-app"
+
+
+---------------------------------------------------------------------------------------------------------
+
+/etc/hosts
+
+192.168.57.209  k8s-storage01
+
+ssh k8s-adm@kos-storage01
+
+# Install NFS Server and create the directory for our exports
+sudo apt install nfs-kernel-server
+sudo mkdir /export/volumes
+sudo mkdir /export/volumes/pod
+
+# Config NFS Export in /etc/export for /export/volumes, using no_root_squash and no_subtree_check to 
+# allow applications to mount subdirectories of the export directly
+sudo bash -c 'echo "/export/volumes *(rw,no_root_squash,no_subtree_check)" > /etc/exports'
+cat /etc/exports
+sudo systemctl restart nfs-kernel-server.service
+
+# On each Node in the Cluster install NFS client
+sudo apt install -y nfs-common
+
+# test
+sudo mount -t nfs4 k8s-storage01:/export/volumes /mnt
+mount | grep nfs-common
+sudo umount /mnt
+     
+# nfs.pv.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-nfs-data
+spec:
+  accessModes:
+    - ReadWriteMany
+  capacity:
+    storage: 10Gi
+  persistentVolumeReclaimPolicy: Retain
+  nfs:
+    server: 192.168.57.209
+    path: "/export/volumes/pod"
+# nfs.pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-nfs-data
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+# nfs.nginx.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-nfs-deployment
+spec:  
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      volumes:
+      - name: webcontent
+        persistentVolumeClaim:
+          claimName: pvc-nfs-data
+      containers:
+      - name: nginx
+        image: nginx
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: webcontent
+          mountPath: "/usr/share/nginx/html/web-app"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-nfs-service
+spec:
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+    protocol: TCP
+    targetPort: 80
+
+# Demo 1 - Static Provisioning Persistant Volumes
+# Create a PV with read/write many and retain as the reclaim policy
+kubectl apply -f nfs.pv.yaml
+
+# Review the created resource
+kubectl get PersistentVolume pv-nfs-data
+
+# Look more closely at the PV and it's configuration
+kubectl describe PersistentVolume pv-nfs-data 
+
+# Create a PVC on that PV
+kubectl apply -f nfs.pvc.yaml
+
+# Check again the status, now it's bound due to the PVC on the PV. See the claim section ...
+kubectl get PersistentVolume
+
+Check the status, Bound.
+# We defined the PVC it statically provisioned the PV, but it's not mounted yet.
+kubectl get PersistenVolumeClaim pvc-nfs-data 
+kubectl describe PersistentVolumeClaim pvc-nfs-data 
+
+# Create content on storage server
+ssh k8s-adm@k8s-storage01
+
+sudo bash -c 'echo "Hello from NFS mount!!!" > /export/volumes/pod.demo.html'
+more /export/volumes/pod.demo.html
+
+# Let's create a Pod ( in a Deployment and add a Service) with a PVC on pvc-nfs-data
+kubectl apply -f nfs.nginx.yaml
+kubectl get service nginx-nfs-service 
+SERVICEIP=$(kubectl get service | grep nginx-nfs-service | awk '{ print $3 }')
+
+# Check if the pods are runnning
+kubectl get pods 
+
+# Let's acces the application to see app data
+curl http://$SERVICEIP/web-app/demo.htm
+
+# Check the Mounted by output for which Pod(s) are accesing this storage
+kubectl describe PersistentVolumeClaim pvc-nfs-data 
+
+# check the running pods
+kubectl get pods
+# NAME                                    READY   STATUS    RESTARTS   AGE
+# nginx-nfs-deployment-5dd946cdd6-8987m   1/1     Running   0          17m
+kubectl exec -it nginx-nfs-deployment-5dd946cdd6-8987m -- /bin/bash
+
+ls /usr/share/nginx/html/web-app/
+demo.html
+
+# What node is the pod on ?
+kubectl get pods -o wide
+
+# NAME                                    READY   STATUS    RESTARTS   AGE   IP              NODE            NOMINATED NODE   READINESS GATES
+# nginx-nfs-deployment-5dd946cdd6-8987m   1/1     Running   0          21m   172.16.67.195   k8s-workern01   <none>           <none>
+
+ssh k8s-adm@k8s-worker01
+mount | grep nfs 
+# 192.168.57.209:/export/volumes/pod on /var/lib/kubelet/pods/24323f1b-b562-49ae-b10a-e1f1b9ff3e89/volumes/kubernetes.io~nfs/pv-nfs-data type nfs4 (rw,relatime,vers=4.2,rsize=262144,wsize=262144,namlen=255,hard,proto=tcp,timeo=600,retrans=2,sec=sys,clientaddr=192.168.57.201,local_lock=none,addr=192.168.57.209)
+
+# Let's delete the pod and see if we still have access to data in PV
+kubectl get pods 
+kubectl delete pods nginx-nfs-deployment-5dd946cdd6-8987m
+
+# We get a new pod, and the data is still there
+kubectl get pods -o wide
+# NAME                                    READY   STATUS    RESTARTS   AGE     IP              NODE            NOMINATED NODE   READINESS GATES
+# nginx-nfs-deployment-5dd946cdd6-rgvgz   1/1     Running   0          2m37s   172.16.67.196   k8s-workern01   <none>           <none>
+curl http://$SERVICEIP/web-app/demo.html
+# Hello from NFS mount!!!
+
+
+# Demo 2 - Controlling PV access with Access Modes and persistentVolumeReclaimPolicy
+# scale up the deployment to 4 replicas
+kubectl scale deployment nginx-nfs-deployment --replicas=4 
+
+# Let's look at who's attached to the pvc, all 4 Pods
+# Our AccessMode for this PV and PVC is RWX ReadWriteMany
+kubectl describe PersistentVolumeClaim 
+
+# Now when we access our app we're getting load balanced across all the pods hitting the same PV data
+curl http://$SERVICEIP/web-app/demo.html
+
+# Delete
+kubectl delete deployment nginx-nfs-deployment
+kubectl delete pvc pvc-nfs-data
+kubectl delete pv pv-nfs-data 
+
+# Storage Class and Dynamic Provicioning Workflow
+#   Define tiers/classes of storage
+#   Enables Dynamic Provisioning
+#   Define infrastructure specific parameters
+#   Reclaim Policy
+
+# Dynamic Provisioning Workflow
+#   Create a StorageClass
+#   Create a PersistentVolumeClaim
+#   Define Volume in Pod Spec
+#       CReate a PersistentVolume
+
+!!! Azure Cloud Demo - skipped for now
+
+# Check out the list of available storage classes, which one is default? Notice the provisioner, Prameters and Reclaim
+kubectl get StorageClass 
+kubectl describe StorageClass default 
+
+
+
+# Kubernetes scheduler
+#    Managing and Controlling the Kubernetes Scheduler
